@@ -131,6 +131,23 @@ class ValheimPlugin(GamePlugin):
 
     # ── Player info ──────────────────────────────────────────────────────────
 
+
+    async def parse_players(self, raw_response: str) -> list[PlayerInfo]:
+        import re
+        players = []
+        for line in raw_response.strip().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            m = re.match(r'^#?\d+\s+(.+?)\s+(\d{17})$', line)
+            if m:
+                players.append(PlayerInfo(name=m.group(1), steam_id=m.group(2)))
+                continue
+            m = re.match(r'^(.+?)\s+-\s+(\d+)$', line)
+            if m:
+                players.append(PlayerInfo(name=m.group(1), steam_id=m.group(2)))
+        return players
+
     async def get_players(self, send_command) -> list[PlayerInfo]:
         """Return connected players. Valheim's list output varies by mod."""
         try:
