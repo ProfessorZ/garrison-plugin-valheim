@@ -22,7 +22,6 @@ import asyncio
 import re
 import struct
 import socket
-from datetime import datetime
 from typing import Optional
 
 from app.plugins.base import GamePlugin, PlayerInfo, ServerStatus, CommandDef
@@ -30,25 +29,13 @@ from app.plugins.base import GamePlugin, PlayerInfo, ServerStatus, CommandDef
 
 # ── Source RCON constants ────────────────────────────────────────────────────
 _SERVERDATA_AUTH = 3
-_SERVERDATA_AUTH_RESPONSE = 2
 _SERVERDATA_EXECCOMMAND = 2
-_SERVERDATA_RESPONSE_VALUE = 0
 
 
 def _pack_packet(request_id: int, packet_type: int, body: str) -> bytes:
     body_bytes = body.encode("utf-8") + b"\x00\x00"
     size = 4 + 4 + len(body_bytes)
     return struct.pack("<iii", size, request_id, packet_type) + body_bytes
-
-
-def _read_packet(sock: socket.socket) -> tuple[int, int, str]:
-    raw_size = _recv_all(sock, 4)
-    size = struct.unpack("<i", raw_size)[0]
-    data = _recv_all(sock, size)
-    request_id = struct.unpack("<i", data[:4])[0]
-    packet_type = struct.unpack("<i", data[4:8])[0]
-    body = data[8:-2].decode("utf-8", errors="replace")
-    return request_id, packet_type, body
 
 
 def _recv_all(sock: socket.socket, length: int) -> bytes:
@@ -59,6 +46,16 @@ def _recv_all(sock: socket.socket, length: int) -> bytes:
             raise ConnectionError("Socket closed prematurely")
         data += chunk
     return data
+
+
+def _read_packet(sock: socket.socket) -> tuple[int, int, str]:
+    raw_size = _recv_all(sock, 4)
+    size = struct.unpack("<i", raw_size)[0]
+    data = _recv_all(sock, size)
+    request_id = struct.unpack("<i", data[:4])[0]
+    packet_type = struct.unpack("<i", data[4:8])[0]
+    body = data[8:-2].decode("utf-8", errors="replace")
+    return request_id, packet_type, body
 
 
 class ValheimPlugin(GamePlugin):
@@ -79,7 +76,6 @@ class ValheimPlugin(GamePlugin):
     # ── Connection ───────────────────────────────────────────────────────────
 
     async def connect(self, host: str, port: int, password: str) -> None:
-        """Connect and authenticate via Source RCON."""
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, self._blocking_connect, host, port, password)
 
@@ -97,7 +93,7 @@ class ValheimPlugin(GamePlugin):
 
         rid = self._next_id()
         sock.sendall(_pack_packet(rid, _SERVERDATA_AUTH, password))
-        resp_id, resp_type, _ = _read_packet(sock)
+        resp_id, _, _ = _read_packet(sock)
         if resp_id == -1:
             sock.close()
             raise PermissionError("RCON authentication failed — wrong password?")
@@ -117,7 +113,6 @@ class ValheimPlugin(GamePlugin):
             self._sock = None
 
     async def send_command(self, command: str) -> str:
-        """Send a raw RCON command and return the response."""
         if not self._sock:
             raise ConnectionError("Not connected to Valheim RCON")
         loop = asyncio.get_event_loop()
@@ -131,51 +126,52 @@ class ValheimPlugin(GamePlugin):
 
     # ── Player info ──────────────────────────────────────────────────────────
 
-
     async def parse_players(self, raw_response: str) -> list[PlayerInfo]:
-        import re
+        """Parse player list from listplayers output.
+
+        ValheimPlus format variants:
+          #N Name SteamID
+          Name - SteamID
+          Name SteamID
+        """
         players = []
         for line in raw_response.strip().splitlines():
             line = line.strip()
             if not line:
                 continue
-            m = re.match(r'^#?\d+\s+(.+?)\s+(\d{17})$', line)
-            if m:
-                players.append(PlayerInfo(name=m.group(1), steam_id=m.group(2)))
+            # Skip header/summary lines
+            if any(kw in line.lower() for kw in ["players connected", "total players"]):
                 continue
-            m = re.match(r'^(.+?)\s+-\s+(\d+)$', line)
-            if m:
-                players.append(PlayerInfo(name=m.group(1), steam_id=m.group(2)))
-        return players
-
-    async def get_players(self, send_command) -> list[PlayerInfo]:
-        """Return connected players. Valheim's list output varies by mod."""
-        try:
-            raw = await send_command("listplayers")
-        except Exception:
-            return []
-
-        players: list[PlayerInfo] = []
-        # ValheimPlus: "Name - SteamID"  or  "#N Name SteamID"
-        for line in raw.strip().splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            # Try "#N Name SteamID" format
+            # "#N Name SteamID"
             m = re.match(r"^#?\d+\s+(.+?)\s+(\d{17})$", line)
             if m:
-                players.append(PlayerInfo(name=m.group(1), player_id=m.group(2)))
+                players.append(PlayerInfo(name=m.group(1), steam_id=m.group(2)))
                 continue
-            # Try "Name - SteamID"
-            m = re.match(r"^(.+?)\s+-\s+(\d+)$", line)
+            # "Name - SteamID"
+            m = re.match(r"^(.+?)\s+-\s+(\d{15,17})$", line)
             if m:
-                players.append(PlayerInfo(name=m.group(1), player_id=m.group(2)))
+                players.append(PlayerInfo(name=m.group(1), steam_id=m.group(2)))
+                continue
+            # "Name SteamID" (trailing 17-digit id)
+            m = re.match(r"^(.+?)\s+(\d{17})$", line)
+            if m:
+                players.append(PlayerInfo(name=m.group(1), steam_id=m.group(2)))
                 continue
             # Fallback: name only
-            if not any(kw in line.lower() for kw in ["player", "connected", "total"]):
-                players.append(PlayerInfo(name=line))
-
+            players.append(PlayerInfo(name=line))
         return players
+
+    async def get_status(self, send_command) -> ServerStatus:
+        try:
+            raw = await send_command("listplayers")
+            players = await self.parse_players(raw)
+            return ServerStatus(online=True, player_count=len(players))
+        except Exception:
+            return ServerStatus(online=False, player_count=0)
+
+    def get_commands(self) -> list[CommandDef]:
+        from schema import get_commands
+        return get_commands()
 
     async def kick_player(self, send_command, name: str, reason: str = "") -> str:
         return await send_command(f"kick {name}")
@@ -186,19 +182,8 @@ class ValheimPlugin(GamePlugin):
     async def unban_player(self, send_command, name: str) -> str:
         return await send_command(f"banned remove {name}")
 
-    async def get_status(self, send_command) -> ServerStatus:
-        try:
-            players = await self.get_players(send_command)
-            return ServerStatus(online=True, player_count=len(players))
-        except Exception:
-            return ServerStatus(online=False, player_count=0)
-
     async def get_player_roles(self) -> list[str]:
-        return []  # Valheim has no role system
+        return []  # Valheim has no role/permission tiers
 
-    async def poll_events(self, send_command, since: datetime) -> list[dict]:
-        return []  # Not supported without log streaming
-
-    def get_commands(self) -> list[CommandDef]:
-        from schema import get_commands
-        return get_commands()
+    async def poll_events(self, send_command, since=None) -> list[dict]:
+        return []  # Not available without log streaming
