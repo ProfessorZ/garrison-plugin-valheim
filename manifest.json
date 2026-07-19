@@ -1,1 +1,15 @@
-{"name":"garrison-plugin-valheim","version":"1.0.0","game_type":"valheim","display_name":"Valheim","author":"ProfessorZ","description":"Valheim dedicated server plugin for Garrison"}
+{
+  "id": "valheim",
+  "name": "garrison-plugin-valheim",
+  "version": "1.0.0",
+  "display_name": "Valheim",
+  "description": "Source RCON plugin for Valheim (requires ValheimPlus or RCON mod)",
+  "author": "ProfessorZ",
+  "repo": "https://github.com/ProfessorZ/garrison-plugin-valheim",
+  "garrison_api": "1",
+  "default_ports": {
+    "game": 2456,
+    "rcon": 2457
+  },
+  "icon": "⚔"
+}
